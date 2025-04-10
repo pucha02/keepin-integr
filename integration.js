@@ -576,6 +576,46 @@ async function getVariationIdBySku(sku) {
   }
 }
 
+// --- Вспомогательная функция для получения текущего остатка товара в Sitniks по variationId ---
+async function getCurrentStockForVariation(variationId) {
+  try {
+    const response = await fetch(getProductsSitniksURL, { headers: headersSitniks });
+    if (!response.ok) {
+      throw new Error(`Ошибка получения данных для variationId ${variationId}: ${response.status}`);
+    }
+    const data = await response.json();
+    let products = [];
+    if (Array.isArray(data)) {
+      products = data;
+    } else if (data.data && Array.isArray(data.data)) {
+      products = data.data;
+    } else {
+      console.error("Непредвиденная структура данных от Sitniks");
+      return null;
+    }
+    // Проходим по всем продуктам и ищем нужную вариацию
+    for (let product of products) {
+      if (product.variations && Array.isArray(product.variations)) {
+        const variation = product.variations.find(v => v.id === variationId);
+        if (variation) {
+          if (variation.warehouses &&
+              Array.isArray(variation.warehouses) &&
+              variation.warehouses.length > 0 &&
+              typeof variation.warehouses[0].availableQuantity !== 'undefined'
+          ) {
+            return variation.warehouses[0].availableQuantity;
+          }
+          return 0;
+        }
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error("Ошибка в getCurrentStockForVariation:", error);
+    return null;
+  }
+}
+
 // --- Обработка входящего вебхука от KeepinCRM ---
 // Формат тела запроса вебхука:
 // {
@@ -598,7 +638,17 @@ app.post('/api/webhook/keepin', async (req, res) => {
       return res.status(400).json({ error: `Товарная вариация для SKU ${material_sku} не найдена` });
     }
 
-    // Формируем payload для обновления в Sitniks
+    // Получаем текущий остаток для данной вариации
+    const currentStock = await getCurrentStockForVariation(variationId);
+    console.log(`Текущий остаток для variationId ${variationId}: ${currentStock}`);
+
+    // Если новый остаток совпадает с текущим – обновление не требуется
+    if (currentStock !== null && parseFloat(amount) === parseFloat(currentStock)) {
+      console.log(`Остаток для SKU ${material_sku} уже равен ${amount}. Обновление не требуется.`);
+      return res.json({ status: "success", message: "Нет изменений" });
+    }
+
+    // Формируем payload для обновления в Sitniks с установкой нового абсолютного значения
     const payload = {
       productVariations: [
         {
@@ -620,9 +670,7 @@ app.post('/api/webhook/keepin', async (req, res) => {
     });
 
     // Проверка заголовка content-length или типа содержимого
-    const contentType = response.headers.get("content-type");
     const contentLength = response.headers.get("content-length");
-
     let result = {};
 
     // Если заголовок content-length присутствует и равен 0, либо ответ пустой, не парсим JSON
@@ -654,7 +702,6 @@ app.post('/api/webhook/keepin', async (req, res) => {
   }
 });
 
-
 // --- Ручной запуск синхронизации (опционально) ---
 app.get('/sync/keepin-to-sitniks', async (req, res) => {
   await syncKeepinToSitniks();
@@ -666,7 +713,7 @@ app.get('/sync/sitniks-to-keepin', async (req, res) => {
   res.json({ status: "syncSitniksToKeepin triggered" });
 });
 
-// --- Планировщик: периодическая синхронизация (например, каждые 60 секунд) ---
+// --- Планировщик: периодическая синхронизация (например, каждые 15 секунд) ---
 setInterval(syncKeepinToSitniks, 15000);
 setInterval(syncSitniksToKeepin, 15000);
 
