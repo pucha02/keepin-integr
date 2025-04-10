@@ -470,23 +470,25 @@ app.post('/api/webhook/keepin', async (req, res) => {
   const { type, material_sku, amount, cost, comment } = req.body;
   console.log("Получен webhook от Keepin:", req.body);
 
-  // Если последнее обновление было совсем недавно, игнорируем событие (чтобы не зациклить)
-  const lastUpdate = lastIntegrationUpdate[material_sku];
-  if (lastUpdate && (Date.now() - lastUpdate < IGNORE_INTERVAL)) {
-    console.log(`Событие для SKU ${material_sku} игнорируется, так как последнее обновление было ${Date.now() - lastUpdate} мс назад.`);
-    return res.json({ status: "ignored", message: "Недостаточно времени прошло после последнего обновления" });
-  }
-
-  // Блокируем обработку для данного SKU
   await acquireLock(material_sku);
   try {
-    // Получаем актуальные данные из Keepin для данного SKU
+    // Попытка получить актуальные данные из Keepin
     const latestKeepinData = await getLatestKeepinDataBySku(material_sku);
-    if (!latestKeepinData) {
-      return res.status(400).json({ error: `Материал с SKU ${material_sku} не найден в Keepin` });
+    let newAmount;
+    if (latestKeepinData && typeof latestKeepinData.stock_available !== 'undefined') {
+      // Если Keepin возвращает абсолютное значение
+      newAmount = latestKeepinData.stock_available;
+    } else {
+      // Если нет актуального абсолютного значения, рассчитываем по дельте
+      // Сначала получаем текущий остаток из Sitniks
+      const variationId = await getVariationIdBySku(material_sku);
+      if (!variationId) {
+        console.error(`В Sitniks не найдена товарная вариация для SKU ${material_sku}`);
+        return res.status(400).json({ error: `Товарная вариация для SKU ${material_sku} не найдена` });
+      }
+      const currentStock = await getCurrentStockForVariation(variationId);
+      newAmount = currentStock + parseFloat(amount);
     }
-    // Берем актуальное значение остатка из Keepin
-    const newAmount = latestKeepinData.stock_available || amount;
 
     // Получаем ID вариации Sitniks по SKU
     const variationId = await getVariationIdBySku(material_sku);
@@ -495,17 +497,15 @@ app.post('/api/webhook/keepin', async (req, res) => {
       return res.status(400).json({ error: `Товарная вариация для SKU ${material_sku} не найдена` });
     }
 
-    // Получаем текущий остаток из Sitniks для данной вариации
     const currentStock = await getCurrentStockForVariation(variationId);
     console.log(`Текущий остаток для variationId ${variationId}: ${currentStock}`);
+    console.log(`Рассчитанное новое значение для SKU ${material_sku}: ${newAmount}`);
 
-    // Если значения совпадают – обновление не требуется
     if (currentStock !== null && parseFloat(newAmount) === parseFloat(currentStock)) {
       console.log(`Остаток для SKU ${material_sku} уже актуален (${newAmount}). Обновление не требуется.`);
       return res.json({ status: "success", message: "Нет изменений" });
     }
 
-    // Формируем payload для обновления в Sitniks, передавая новое значение
     const payload = {
       productVariations: [
         {
@@ -547,7 +547,7 @@ app.post('/api/webhook/keepin', async (req, res) => {
     }
 
     console.log("Обновление через webhook прошло успешно:", result);
-    // Фиксируем время обновления для данного SKU, чтобы избежать обратной синхронизации
+    // Фиксируем время обновления для избежания циклических синхронизаций
     lastIntegrationUpdate[material_sku] = Date.now();
     res.json({ status: "success", result });
   } catch (error) {
@@ -557,6 +557,7 @@ app.post('/api/webhook/keepin', async (req, res) => {
     releaseLock(material_sku);
   }
 });
+
 
 // --- Ручные эндпоинты для синхронизации (опционально) ---
 
