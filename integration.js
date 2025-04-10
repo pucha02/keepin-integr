@@ -586,19 +586,19 @@ async function getVariationIdBySku(sku) {
 //   "cost": {{cost}},
 //   "comment": "{{comment}}"
 // }
-app.post('/api/webhook/keepin', async (req, res) => {
+app.post('/webhook/keepin', async (req, res) => {
   try {
     const { type, material_sku, amount, cost, comment } = req.body;
     console.log("Получен webhook от Keepin:", req.body);
 
-    // Для обновления в Sitniks требуется корректная товарная вариация: ищем id по SKU
+    // Ищем правильную товарную вариацию в Sitniks по SKU
     const variationId = await getVariationIdBySku(material_sku);
     if (!variationId) {
       console.error(`В Sitniks не найдена товарная вариация для SKU ${material_sku}`);
       return res.status(400).json({ error: `Товарная вариация для SKU ${material_sku} не найдена` });
     }
 
-    // Формируем payload для обновления в Sitniks с использованием id вариации
+    // Формируем payload для обновления в Sitniks
     const payload = {
       productVariations: [
         {
@@ -619,13 +619,33 @@ app.post('/api/webhook/keepin', async (req, res) => {
       body: JSON.stringify(payload)
     });
 
+    // Проверка заголовка content-length или типа содержимого
+    const contentType = response.headers.get("content-type");
+    const contentLength = response.headers.get("content-length");
+
+    let result = {};
+
+    // Если заголовок content-length присутствует и равен 0, либо ответ пустой, не парсим JSON
+    if (contentLength && parseInt(contentLength) === 0) {
+      result = {};
+    } else {
+      const text = await response.text();
+      if (text) {
+        try {
+          result = JSON.parse(text);
+        } catch (parseError) {
+          console.error("Ошибка при разборе ответа от Sitniks:", parseError);
+          // Если разбор не удался, сохраняем как raw текст
+          result = { raw: text };
+        }
+      }
+    }
+
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`Ошибка обновления в Sitniks через webhook: ${response.status} - ${errorText}`);
+      console.error(`Ошибка обновления в Sitniks через webhook: ${response.status} -`, result);
       return res.status(500).json({ error: `Ошибка обновления в Sitniks: ${response.status}` });
     }
 
-    const result = await response.json();
     console.log("Обновление через webhook прошло успешно:", result);
     res.json({ status: "success", result });
   } catch (error) {
@@ -633,6 +653,7 @@ app.post('/api/webhook/keepin', async (req, res) => {
     res.status(500).json({ error: "Внутренняя ошибка сервера" });
   }
 });
+
 
 // --- Ручной запуск синхронизации (опционально) ---
 app.get('/sync/keepin-to-sitniks', async (req, res) => {
