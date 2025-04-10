@@ -343,8 +343,8 @@ const updateMaterialBySkuURL = (sku) => `https://api.keepincrm.com/v1/materials/
 const getProductsSitniksURL = "https://crm.sitniks.com/open-api/products";
 const updateStockSitniksURL = "https://crm.sitniks.com/open-api/inventory/quantity";
 
-// ID складов и другие константы
-const warehouseIdSitniks = 4505;   // Склад, используемый в Sitniks
+// ID склада и другие константы
+const warehouseIdSitniks = 4505;
 const OFFICE_ID = 98279;
 const OFFICE_HASH_ID = "hash123";
 const OFFICE_NAME = "Main Office";
@@ -543,32 +543,66 @@ async function syncSitniksToKeepin() {
   }
 }
 
-// --- Обработка входящего вебхука от KeepinCRM ---
-
-/*
-  Формат тела запроса вебхука:
-  {
-    "type": "{{type}}",
-    "material_sku": "{{material.sku}}",
-    "amount": {{amount}},
-    "additional text": "From KeepinCRM",
-    "cost": {{cost}},
-    "comment": "{{comment}}"
+// --- Вспомогательная функция для поиска productVariation по SKU ---
+// Эта функция запрашивает товары из Sitniks и ищет ID вариации по переданному SKU.
+async function getVariationIdBySku(sku) {
+  try {
+    const response = await fetch(getProductsSitniksURL, { headers: headersSitniks });
+    if (!response.ok) {
+      throw new Error(`Ошибка запроса к Sitniks для получения товаров: ${response.status}`);
+    }
+    const data = await response.json();
+    let products = [];
+    if (Array.isArray(data)) {
+      products = data;
+    } else if (data.data && Array.isArray(data.data)) {
+      products = data.data;
+    } else {
+      console.error("Непредвиденная структура данных от Sitniks");
+      return null;
+    }
+    for (let product of products) {
+      if (product.variations && Array.isArray(product.variations)) {
+        const match = product.variations.find(variation => variation.sku === sku);
+        if (match) {
+          return match.id;
+        }
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error("Ошибка в getVariationIdBySku:", error);
+    return null;
   }
-  В данном примере, при получении вебхука мы передаём обновление остатков в Sitniks.
-*/
+}
+
+// --- Обработка входящего вебхука от KeepinCRM ---
+// Формат тела запроса вебхука:
+// {
+//   "type": "{{type}}",
+//   "material_sku": "{{material.sku}}",
+//   "amount": {{amount}},
+//   "additional text": "From KeepinCRM",
+//   "cost": {{cost}},
+//   "comment": "{{comment}}"
+// }
 app.post('/api/webhook/keepin', async (req, res) => {
   try {
     const { type, material_sku, amount, cost, comment } = req.body;
     console.log("Получен webhook от Keepin:", req.body);
 
-    // Здесь можно добавить ветвление логики в зависимости от типа события (например, "order", "stock_update" и т.д.)
-    // В данном примере обрабатываем обновление остатков.
+    // Для обновления в Sitniks требуется корректная товарная вариация: ищем id по SKU
+    const variationId = await getVariationIdBySku(material_sku);
+    if (!variationId) {
+      console.error(`В Sitniks не найдена товарная вариация для SKU ${material_sku}`);
+      return res.status(400).json({ error: `Товарная вариация для SKU ${material_sku} не найдена` });
+    }
 
+    // Формируем payload для обновления в Sitniks с использованием id вариации
     const payload = {
       productVariations: [
         {
-          sku: material_sku,
+          id: variationId,
           quantity: amount,
           cost: cost,
           comment: comment,
@@ -600,22 +634,18 @@ app.post('/api/webhook/keepin', async (req, res) => {
   }
 });
 
-// --- Дополнительные ручные точки запуска синхронизации (опционально) ---
-
-// Ручной запуск синхронизации из Keepin в Sitniks
+// --- Ручной запуск синхронизации (опционально) ---
 app.get('/sync/keepin-to-sitniks', async (req, res) => {
   await syncKeepinToSitniks();
   res.json({ status: "syncKeepinToSitniks triggered" });
 });
 
-// Ручной запуск обратной синхронизации из Sitniks в Keepin
 app.get('/sync/sitniks-to-keepin', async (req, res) => {
   await syncSitniksToKeepin();
   res.json({ status: "syncSitniksToKeepin triggered" });
 });
 
-// --- Планировщик (setInterval) ---
-// Периодически вызываем синхронизацию (например, каждые 60 секунд, интервал можно настроить)
+// --- Планировщик: периодическая синхронизация (например, каждые 60 секунд) ---
 setInterval(syncKeepinToSitniks, 60000);
 setInterval(syncSitniksToKeepin, 60000);
 
