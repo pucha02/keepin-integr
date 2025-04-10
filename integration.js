@@ -586,7 +586,7 @@ async function getVariationIdBySku(sku) {
 //   "cost": {{cost}},
 //   "comment": "{{comment}}"
 // }
-app.post('/webhook/keepin', async (req, res) => {
+app.post('/api/webhook/keepin', async (req, res) => {
   try {
     const { type, material_sku, amount, cost, comment } = req.body;
     console.log("Получен webhook от Keepin:", req.body);
