@@ -512,7 +512,7 @@ app.post('/api/webhook/keepin', async (req, res) => {
       productVariations: [
         {
           id: variationId,
-          quantity: newAmount,
+          quantity: currentStock,
           cost: cost,
           comment: comment,
           warehouseId: warehouseIdSitniks
