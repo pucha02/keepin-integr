@@ -1,0 +1,9 @@
+{
+  "type": "module",
+  "dependencies": {
+    "express": "^5.1.0",
+    "fetch": "^1.1.0",
+    "mongodb": "^6.15.0",
+    "node-fetch": "^3.3.2"
+  }
+}
