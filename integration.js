@@ -667,8 +667,8 @@ app.get('/sync/sitniks-to-keepin', async (req, res) => {
 });
 
 // --- Планировщик: периодическая синхронизация (например, каждые 60 секунд) ---
-setInterval(syncKeepinToSitniks, 60000);
-setInterval(syncSitniksToKeepin, 60000);
+setInterval(syncKeepinToSitniks, 15000);
+setInterval(syncSitniksToKeepin, 15000);
 
 // --- Запуск сервера ---
 app.listen(PORT, () => {
