@@ -497,7 +497,7 @@ app.post('/api/webhook/keepin', async (req, res) => {
       return res.status(400).json({ error: `Товарная вариация для SKU ${material_sku} не найдена` });
     }
 
-    // Получаем текущий остаток из Sitniks для данной вариации
+    // Получаем текущий остаток из Sitniks для данной вариации (для проверки)
     const currentStock = await getCurrentStockForVariation(variationId);
     console.log(`Текущий остаток для variationId ${variationId}: ${currentStock}`);
 
@@ -507,12 +507,12 @@ app.post('/api/webhook/keepin', async (req, res) => {
       return res.json({ status: "success", message: "Нет изменений" });
     }
 
-    // Формируем payload для обновления в Sitniks с установкой нового абсолютного значения
+    // **Важное исправление:** используем newAmount (новое значение), а не currentStock
     const payload = {
       productVariations: [
         {
           id: variationId,
-          quantity: currentStock,
+          quantity: newAmount, // Передаем актуальное значение из Keepin!
           cost: cost,
           comment: comment,
           warehouseId: warehouseIdSitniks
@@ -559,6 +559,7 @@ app.post('/api/webhook/keepin', async (req, res) => {
     releaseLock(material_sku);
   }
 });
+
 
 // --- Опциональные ручные эндпоинты для синхронизации ---
 
