@@ -778,15 +778,15 @@ mongoose.connect('mongodb+srv://salaryapp5:aM5DtXeMRklFosy5@cluster0.l1wfm.mongo
   .then(() => console.log("MongoDB подключён"))
   .catch(err => console.error("Ошибка подключения к MongoDB:", err));
 
-// Схемы для хранения остатков и логирования списаний
+// Схема для хранения физического остатка товара (stockQuantity)
 const productStockSchema = new mongoose.Schema({
   sku: { type: String, required: true, unique: true },
-  // Теперь будем хранить фактический остаток (stockQuantity)
   stockQuantity: { type: Number, required: true },
   updatedAt: { type: Date, default: Date.now }
 });
 const ProductStock = mongoose.model('ProductStock', productStockSchema);
 
+// Схема для логирования операций списания
 const stockLogSchema = new mongoose.Schema({
   sku: { type: String, required: true },
   writeOffAmount: { type: Number, required: true },
@@ -795,7 +795,6 @@ const stockLogSchema = new mongoose.Schema({
 });
 const StockLog = mongoose.model('StockLog', stockLogSchema);
 
-// Middleware для обработки JSON
 app.use(express.json());
 
 // --- Конфигурация API и констант ---
@@ -821,6 +820,9 @@ const updateStockSitniksURL = "https://crm.sitniks.com/open-api/inventory/quanti
 
 // Дополнительные параметры
 const warehouseIdSitniks = 4505;
+const OFFICE_ID = 98279;
+const OFFICE_HASH_ID = "hash123";
+const OFFICE_NAME = "Main Office";
 
 // --- Механизм блокировки по SKU (in-memory) ---
 const locks = {};
@@ -835,7 +837,6 @@ function releaseLock(key) {
 }
 
 // --- Вспомогательные функции для API ---
-
 // Получение данных из Keepin по SKU
 async function getLatestKeepinDataBySku(sku) {
   try {
@@ -853,7 +854,7 @@ async function getLatestKeepinDataBySku(sku) {
   }
 }
 
-// Получение ID вариации в Sitniks по SKU
+// Получение ID вариации товара в Sitniks по SKU
 async function getVariationIdBySku(sku) {
   try {
     const response = await fetch(getProductsSitniksURL, { headers: headersSitniks });
@@ -873,8 +874,8 @@ async function getVariationIdBySku(sku) {
   }
 }
 
-// Получение фактического физического остатка для вариации в Sitniks  
-// Используем поле stockQuantity вместо availableQuantity для определения реального списания
+// Получение фактического остатка для вариации в Sitniks
+// Мы ориентируемся на поле stockQuantity для определения реального (физического) остатка товара.
 async function getCurrentStockForVariation(variationId) {
   try {
     const response = await fetch(getProductsSitniksURL, { headers: headersSitniks });
@@ -903,7 +904,7 @@ async function getCurrentStockForVariation(variationId) {
 }
 
 // --- Обработка вебхука от Keepin ---
-// При поступлении webhook из Keepin обновляем Sitniks (состояние Sitniks меняется "пушем" данные из Keepin)
+// При получении webhook из Keepin обновляем Sitniks "пушем" данные из Keepin
 app.post('/api/webhook/keepin', async (req, res) => {
   const { material_sku, amount, cost, comment } = req.body;
   console.log("Получен webhook от Keepin:", req.body);
@@ -914,7 +915,7 @@ app.post('/api/webhook/keepin', async (req, res) => {
     const latestData = await getLatestKeepinDataBySku(material_sku);
     if (!latestData) return res.status(400).json({ error: "Материал не найден в Keepin" });
 
-    const newAmount = latestData.stock_available; // абсолютное значение остатков из Keepin
+    const newAmount = latestData.stock_available; // абсолютное значение остатка в Keepin
     const variationId = await getVariationIdBySku(material_sku);
     if (!variationId) {
       console.error(`В Sitniks не найдена вариация для SKU ${material_sku}`);
@@ -956,10 +957,12 @@ app.post('/api/webhook/keepin', async (req, res) => {
 });
 
 // --- Периодическая синхронизация списаний из Sitniks в Keepin ---
-// Здесь мы опрашиваем Sitniks, сравнивая фактический остаток (stockQuantity) с сохранённым в базе
+// Здесь опрашиваем Sitniks, сравниваем фактический остаток (stockQuantity) с данными в БД,
+// и если обнаруживается реальное списание – отправляем обновленный объект материала в Keepin.
 async function syncSitniksToKeepin() {
   try {
     console.log("Синхронизация списаний Sitniks -> Keepin запущена");
+
     // Получаем базовые данные из Keepin
     const keepinRes = await fetch(getProductsKeepinURL, { headers: headersKeepin });
     if (!keepinRes.ok) throw new Error(`Ошибка запроса к Keepin: ${keepinRes.status}`);
@@ -968,13 +971,14 @@ async function syncSitniksToKeepin() {
       console.log("Нет материалов в Keepin");
       return;
     }
+
     // Получаем данные из Sitniks
     const sitniksRes = await fetch(getProductsSitniksURL, { headers: headersSitniks });
     if (!sitniksRes.ok) throw new Error(`Ошибка запроса к Sitniks: ${sitniksRes.status}`);
     const sitniksRaw = await sitniksRes.json();
     let sitniksProducts = Array.isArray(sitniksRaw) ? sitniksRaw : (sitniksRaw.data || []);
     
-    // Группируем по SKU для быстрого доступа
+    // Группируем данные по SKU для быстрого доступа
     const sitniksBySku = {};
     sitniksProducts.forEach(prod => {
       if (prod.variations && Array.isArray(prod.variations)) {
@@ -986,21 +990,24 @@ async function syncSitniksToKeepin() {
       }
     });
 
+    // Обрабатываем каждый материал из Keepin
     for (const material of keepinData.items) {
       const sku = material.sku;
       const match = sitniksBySku[sku];
       if (!match) continue;
       
-      // Получаем фактический остаток (stockQuantity) из Sitniks
-      let newStock = material.stock_available; // значение по умолчанию из Keepin
-      if (match.variation.warehouses &&
-          Array.isArray(match.variation.warehouses) &&
-          match.variation.warehouses.length > 0 &&
-          typeof match.variation.warehouses[0].stockQuantity !== 'undefined') {
+      // Получаем фактический остаток из Sitniks по полю stockQuantity
+      let newStock = material.stock_available; // значение по умолчанию, если Sitniks не выдаёт stockQuantity
+      if (
+        match.variation.warehouses &&
+        Array.isArray(match.variation.warehouses) &&
+        match.variation.warehouses.length > 0 &&
+        typeof match.variation.warehouses[0].stockQuantity !== 'undefined'
+      ) {
         newStock = match.variation.warehouses[0].stockQuantity;
       }
       
-      // Работа с БД: получаем или создаём запись о предыдущем физическом остатке
+      // Работа с MongoDB: получаем или создаём запись о физическом остатке
       let stockRecord = await ProductStock.findOne({ sku });
       if (!stockRecord) {
         stockRecord = new ProductStock({ sku, stockQuantity: newStock });
@@ -1014,34 +1021,72 @@ async function syncSitniksToKeepin() {
           const log = new StockLog({
             sku,
             writeOffAmount,
-            comment: "Списание по периодической синхронизации из Sitniks (изменение stockQuantity)"
+            comment: "Списание по периодической синхронизации из Sitniks (stockQuantity уменьшился)"
           });
           await log.save();
 
-          // Отправляем данные о списании в Keepin
-          const updateData = {
-            sku,
-            write_off: writeOffAmount,
-            comment: "Списание по периодической синхронизации из Sitniks (stockQuantity уменьшился)"
+          // Получаем актуальный материал из Keepin для формирования полного объекта обновления
+          const keepinMaterial = await getLatestKeepinDataBySku(sku);
+          if (!keepinMaterial) {
+            console.error(`Не удалось получить материал с SKU ${sku} из Keepin`);
+            continue;
+          }
+
+          // Вычисляем новое значение available в Keepin как:
+          // текущий available (stock_available) минус writeOffAmount
+          const newAvailable = parseFloat(keepinMaterial.stock_available) - writeOffAmount;
+
+          // Формируем полный объект обновления согласно схеме Keepin
+          const updatePayload = {
+            sku: sku,
+            title: keepinMaterial.title,
+            unit: keepinMaterial.unit || "шт.",
+            price: parseFloat(keepinMaterial.price_amount) || 0,
+            cost: parseFloat(keepinMaterial.cost_amount) || 0,
+            currency: keepinMaterial.currency || "UAH",
+            cost_currency: keepinMaterial.cost_currency || "UAH",
+            weight: keepinMaterial.weight || 0,
+            volume: keepinMaterial.volume || 0,
+            asset_url: keepinMaterial.asset_url || "",
+            link_url: keepinMaterial.link_url || "",
+            category_id: keepinMaterial.marketplace_uid || 0,
+            vat_group_title: "",
+            irrelevant: keepinMaterial.irrelevant || false,
+            available: newAvailable,
+            stock_rests_attributes: [
+              {
+                office_id: OFFICE_ID,
+                office_hash_id: OFFICE_HASH_ID,
+                office_name: OFFICE_NAME,
+                available: newAvailable
+              }
+            ],
+            custom_fields: [],
+            named_custom_prices: {
+              "Опт": 10,
+              "Інтернет": "12 USD"
+            }
           };
+
           const updateURL = updateMaterialBySkuURL(sku);
           try {
             const updateRes = await fetch(updateURL, {
               method: "PUT",
               headers: headersKeepin,
-              body: JSON.stringify(updateData)
+              body: JSON.stringify(updatePayload)
             });
             if (!updateRes.ok) {
               const errorText = await updateRes.text();
-              console.error(`Ошибка фиксации списания для SKU ${sku}: ${errorText}`);
+              console.error(`Ошибка фиксации списания для SKU ${sku}: ${updateRes.status} - ${errorText}`);
             } else {
-              console.log(`Списание для SKU ${sku} успешно передано в Keepin`);
+              const result = await updateRes.json();
+              console.log(`Списание для SKU ${sku} успешно передано в Keepin:`, result);
             }
           } catch (error) {
-            console.error(`Ошибка отправки списания для SKU ${sku}:`, error);
+            console.error(`Ошибка отправки данных о списании для SKU ${sku}:`, error);
           }
         }
-        // Обновляем запись в БД
+        // Обновляем запись в БД с новым физическим остатком
         stockRecord.stockQuantity = newStock;
         stockRecord.updatedAt = new Date();
         await stockRecord.save();
@@ -1052,7 +1097,7 @@ async function syncSitniksToKeepin() {
   }
 }
 
-// Запускаем периодическую синхронизацию (например, каждые 30 секунд)
+// Запуск периодической синхронизации (например, каждые 30 секунд)
 setInterval(syncSitniksToKeepin, 30000);
 
 // Запуск сервера
