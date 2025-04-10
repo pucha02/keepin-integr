@@ -1085,3 +1085,14 @@ app.get('/sync/full', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Интеграционный сервер запущен на порту ${PORT}`);
 });
+
+
+setInterval(async () => {
+  try {
+    const response = await fetch(`http://localhost:${PORT}/sync/full`);
+    const result = await response.json();
+    console.log("Автосинхронизация /sync/full:", result);
+  } catch (error) {
+    console.error("Ошибка при автосинхронизации:", error);
+  }
+}, 15000);
