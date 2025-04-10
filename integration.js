@@ -557,7 +557,7 @@ async function syncSitniksToKeepin() {
   }
   В данном примере, при получении вебхука мы передаём обновление остатков в Sitniks.
 */
-app.post('/webhook/keepin', async (req, res) => {
+app.post('/api/webhook/keepin', async (req, res) => {
   try {
     const { type, material_sku, amount, cost, comment } = req.body;
     console.log("Получен webhook от Keepin:", req.body);
