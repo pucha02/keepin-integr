@@ -770,158 +770,113 @@ import mongoose from 'mongoose';
 const app = express();
 const PORT = 5001;
 
-// Подключение к MongoDB
-mongoose.connect('mongodb+srv://salaryapp5:aM5DtXeMRklFosy5@cluster0.l1wfm.mongodb.net/test?retryWrites=true&w=majority', { 
-  useNewUrlParser: true, 
-  useUnifiedTopology: true 
-})
-  .then(() => console.log("MongoDB подключён"))
-  .catch(err => console.error("Ошибка подключения к MongoDB:", err));
+// --- Подключение к MongoDB ---
+mongoose.connect(
+  'mongodb+srv://salaryapp5:aM5DtXeMRklFosy5@cluster0.l1wfm.mongodb.net/test?retryWrites=true&w=majority',
+  { useNewUrlParser: true, useUnifiedTopology: true }
+)
+.then(() => console.log("MongoDB подключён"))
+.catch(err => console.error("Ошибка подключения к MongoDB:", err));
 
-// Схема для хранения информации об остатках (опционально, если нужна история)
+// --- Схема для хранения остатков и метки последнего синхрона ---
 const productStockSchema = new mongoose.Schema({
   sku: { type: String, required: true, unique: true },
   stockQuantity: { type: Number, required: true },
-  updatedAt: { type: Date, default: Date.now }
+  lastSyncedAt: { type: Date, default: new Date(0) }  // с эпохи
 });
 const ProductStock = mongoose.model('ProductStock', productStockSchema);
 
-// Схема для логирования операций обновления (опционально)
+// --- Лог операций (опционально) ---
 const stockLogSchema = new mongoose.Schema({
-  sku: { type: String, required: true },
-  newStock: { type: Number, required: true },
-  comment: { type: String, default: "" },
+  sku: String,
+  newStock: Number,
+  comment: String,
   timestamp: { type: Date, default: Date.now }
 });
 const StockLog = mongoose.model('StockLog', stockLogSchema);
 
 app.use(express.json());
 
-/* --- Конфигурация API и констант --- */
-// Заголовки для KeepinCRM
+// --- Константы API Keepin и Sitniks ---
 const headersKeepin = {
   "X-Auth-Token": "XSrcGKCWebJUd7zwndHa57Hx",
   "Content-Type": "application/json"
 };
-
-// Заголовки для SitniksCRM
 const headersSitniks = {
   "Authorization": "Bearer Dioyg6qqdMhyx5iQz6BU24ZBz83HAIdPIEJ5X51YEvw",
   "Content-Type": "application/json"
 };
-
-// URL для KeepinCRM
 const getProductsKeepinURL = "https://api.keepincrm.com/v1/materials";
-const updateMaterialBySkuURL = (sku) => `https://api.keepincrm.com/v1/materials/sku/${sku}`;
-
-// URL для SitniksCRM
+const updateMaterialBySkuURL = sku => `https://api.keepincrm.com/v1/materials/sku/${sku}`;
 const getProductsSitniksURL = "https://crm.sitniks.com/open-api/products";
 const updateStockSitniksURL = "https://crm.sitniks.com/open-api/inventory/quantity";
-
-// Дополнительные параметры
 const warehouseIdSitniks = 4505;
 const OFFICE_ID = 98279;
 const OFFICE_HASH_ID = "hash123";
 const OFFICE_NAME = "Main Office";
 
-// --- Механизм блокировки по SKU (in-memory) ---
-// Чтобы избежать параллельного обновления одного и того же SKU
+// --- Локальные блокировки ---
 const locks = {};
 async function acquireLock(key) {
-  while (locks[key]) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
+  while (locks[key]) await new Promise(r => setTimeout(r, 100));
   locks[key] = true;
 }
 function releaseLock(key) {
   delete locks[key];
 }
 
-/* --- Вспомогательные функции для работы с API --- */
+// --- Глобальный флаг полного синхрона ---
+let isFullSyncRunning = false;
 
-// Получение данных материала из Keepin по SKU
+// --- Вспомогательные функции ---
 async function getLatestKeepinDataBySku(sku) {
   try {
     const response = await fetch(getProductsKeepinURL, { headers: headersKeepin });
-    if (!response.ok) throw new Error(`Ошибка запроса к Keepin: ${response.status}`);
+    if (!response.ok) throw new Error(`Keepin request error: ${response.status}`);
     const data = await response.json();
-    if (!data.items || data.items.length === 0) {
-      console.error("В Keepin нет материалов");
-      return null;
-    }
-    return data.items.find(item => item.sku === sku) || null;
-  } catch (error) {
-    console.error("Ошибка в getLatestKeepinDataBySku:", error);
+    return (data.items || []).find(item => item.sku === sku) || null;
+  } catch (err) {
+    console.error("getLatestKeepinDataBySku error:", err);
     return null;
   }
 }
 
-// Получение ID вариации из Sitniks по SKU
 async function getVariationIdBySku(sku) {
   try {
     const response = await fetch(getProductsSitniksURL, { headers: headersSitniks });
-    if (!response.ok) throw new Error(`Ошибка запроса к Sitniks: ${response.status}`);
+    if (!response.ok) throw new Error(`Sitniks request error: ${response.status}`);
     const data = await response.json();
     const products = Array.isArray(data) ? data : (data.data || []);
-    for (let product of products) {
-      if (product.variations && Array.isArray(product.variations)) {
-        const match = product.variations.find(variation => variation.sku === sku);
+    for (let p of products) {
+      if (p.variations) {
+        const match = p.variations.find(v => v.sku === sku);
         if (match) return match.id;
       }
     }
     return null;
-  } catch (error) {
-    console.error("Ошибка в getVariationIdBySku:", error);
+  } catch (err) {
+    console.error("getVariationIdBySku error:", err);
     return null;
   }
 }
 
-// Получение физического остатка (stockQuantity) из Sitniks по variationId
-async function getCurrentStockForVariation(variationId) {
-  try {
-    const response = await fetch(getProductsSitniksURL, { headers: headersSitniks });
-    if (!response.ok) throw new Error(`Ошибка получения данных для variationId ${variationId}: ${response.status}`);
-    const data = await response.json();
-    const products = Array.isArray(data) ? data : (data.data || []);
-    for (let product of products) {
-      if (product.variations && Array.isArray(product.variations)) {
-        const variation = product.variations.find(v => v.id === variationId);
-        if (variation) {
-          if (variation.warehouses &&
-              Array.isArray(variation.warehouses) &&
-              variation.warehouses.length > 0 &&
-              typeof variation.warehouses[0].stockQuantity !== 'undefined') {
-            return variation.warehouses[0].stockQuantity;
-          }
-          return 0;
-        }
-      }
-    }
-    return null;
-  } catch (error) {
-    console.error("Ошибка в getCurrentStockForVariation:", error);
-    return null;
-  }
-}
-
-/* --- Обработка вебхуков --- */
-// Если приходят изменения из Keepin, обновляем Sitniks (это "пуш" обновлений)
+// --- Webhook из Keepin (пуш) ---
 app.post('/api/webhook/keepin', async (req, res) => {
   const { material_sku, cost, comment } = req.body;
-  console.log("Получен webhook от Keepin:", req.body);
+  console.log("Webhook Keepin:", material_sku);
+
+  if (isFullSyncRunning) {
+    return res.status(409).json({ error: 'Full sync in progress, retry later' });
+  }
 
   await acquireLock(material_sku);
   try {
-    // Получаем материал из Keepin и берем абсолютное значение остатка
     const latestData = await getLatestKeepinDataBySku(material_sku);
-    if (!latestData) return res.status(400).json({ error: "Материал не найден в Keepin" });
+    if (!latestData) return res.status(400).json({ error: "Not found in Keepin" });
 
     const newAmount = latestData.stock_available;
     const variationId = await getVariationIdBySku(material_sku);
-    if (!variationId) {
-      console.error(`В Sitniks не найдена вариация для SKU ${material_sku}`);
-      return res.status(400).json({ error: "В Sitniks не найдена вариация" });
-    }
+    if (!variationId) return res.status(400).json({ error: "Variation not found in Sitniks" });
 
     const payload = {
       productVariations: [
@@ -935,164 +890,125 @@ app.post('/api/webhook/keepin', async (req, res) => {
       ]
     };
 
-    console.log(`Обновляем остатки в Sitniks для SKU ${material_sku}:`, payload);
-    const response = await fetch(updateStockSitniksURL, {
+    const resp = await fetch(updateStockSitniksURL, {
       method: 'PUT',
       headers: headersSitniks,
       body: JSON.stringify(payload)
     });
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Ошибка обновления Sitniks:", errorText);
-      return res.status(500).json({ error: "Ошибка обновления в Sitniks" });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error("Sitniks update error:", errText);
+      return res.status(500).json({ error: "Sitniks update failed" });
     }
-    console.log(`Обновление Sitniks для SKU ${material_sku} прошло успешно`);
-    res.json({ status: "success" });
-  } catch (error) {
-    console.error("Ошибка обработки webhook Keepin:", error);
-    res.status(500).json({ error: "Внутренняя ошибка сервера" });
+
+    await ProductStock.findOneAndUpdate(
+      { sku: material_sku },
+      { stockQuantity: newAmount, lastSyncedAt: new Date() },
+      { upsert: true }
+    );
+    await new StockLog({ sku: material_sku, newStock: newAmount, comment: 'Webhook push' }).save();
+
+    res.json({ status: "ok" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
   } finally {
     releaseLock(material_sku);
   }
 });
 
-/* --- Полный перегон остатков из Sitniks в Keepin --- */
-// Этот endpoint производит полный перегон всех остатков из Sitniks в Keepin
-// Он опрашивает Sitniks, группирует данные по SKU и для каждого материала получает
-// актуальное значение физического остатка, а затем обновляет материал в Keepin.
+// --- Полный инкрементальный синхрон (pull) ---
 app.get('/sync/full', async (req, res) => {
+  if (isFullSyncRunning) {
+    return res.status(429).json({ error: 'Full sync already running' });
+  }
+  isFullSyncRunning = true;
+
   try {
-    console.log("Запуск полного переноса остатков из Sitniks в Keepin");
+    console.log("Starting incremental full sync");
 
-    // Получаем товары из Sitniks
-    const sitniksRes = await fetch(getProductsSitniksURL, { headers: headersSitniks });
-    if (!sitniksRes.ok) throw new Error(`Ошибка запроса к Sitniks: ${sitniksRes.status}`);
-    const sitniksRaw = await sitniksRes.json();
-    const sitniksProducts = Array.isArray(sitniksRaw) ? sitniksRaw : (sitniksRaw.data || []);
+    const allStocks = await ProductStock.find({});
+    const sitRes = await fetch(getProductsSitniksURL, { headers: headersSitniks });
+    if (!sitRes.ok) throw new Error(`Sitniks error ${sitRes.status}`);
+    const sitData = await sitRes.json();
+    const sitProducts = Array.isArray(sitData) ? sitData : (sitData.data || []);
 
-    // Группируем товары по SKU:
-    // Для каждого варианта с заданным SKU получаем stockQuantity (из первого склада)
-    const stocksBySku = {};
-    sitniksProducts.forEach(product => {
-      if (product.variations && Array.isArray(product.variations)) {
-        product.variations.forEach(variation => {
-          if (variation.sku) {
-            // Если в warehouses указан stockQuantity, используем его
-            let stock = 0;
-            if (variation.warehouses &&
-                Array.isArray(variation.warehouses) &&
-                variation.warehouses.length > 0 &&
-                typeof variation.warehouses[0].stockQuantity !== 'undefined') {
-              stock = variation.warehouses[0].stockQuantity;
-            }
-            stocksBySku[variation.sku] = stock;
-          }
-        });
-      }
+    const sitMap = {};
+    sitProducts.forEach(p => {
+      p.variations?.forEach(v => {
+        if (!v.sku) return;
+        const stock = v.warehouses?.[0]?.stockQuantity ?? 0;
+        const updatedAt = new Date(v.updatedAt || Date.now());
+        sitMap[v.sku] = { stock, updatedAt };
+      });
     });
-    console.log("Найденные остатки по SKU из Sitniks:", stocksBySku);
 
-    // Для каждого SKU из Sitniks обновляем материал в Keepin
-    for (const sku in stocksBySku) {
-      const newStock = stocksBySku[sku];
+    for (let { sku, lastSyncedAt } of allStocks) {
+      const sit = sitMap[sku];
+      if (!sit || sit.updatedAt <= lastSyncedAt) continue;
 
-      // Получаем актуальные данные материала из Keepin
-      const keepinMaterial = await getLatestKeepinDataBySku(sku);
-      if (!keepinMaterial) {
-        console.error(`Материал с SKU ${sku} не найден в Keepin`);
-        continue;
-      }
+      const keepinMat = await getLatestKeepinDataBySku(sku);
+      if (!keepinMat) continue;
 
-      // Формируем payload согласно схеме Keepin:
-      // Обновляем поле available и соответствующий объект stock_rests_attributes
-      const updatePayload = {
+      const payload = {
         sku: sku,
-        title: keepinMaterial.title,
-        unit: keepinMaterial.unit || "шт.",
-        price: parseFloat(keepinMaterial.price_amount) || 0,
-        cost: parseFloat(keepinMaterial.cost_amount) || 0,
-        currency: keepinMaterial.currency || "UAH",
-        cost_currency: keepinMaterial.cost_currency || "UAH",
-        weight: keepinMaterial.weight || 0,
-        volume: keepinMaterial.volume || 0,
-        asset_url: keepinMaterial.asset_url || "",
-        link_url: keepinMaterial.link_url || "",
-        category_id: keepinMaterial.marketplace_uid || 0,
-        vat_group_title: "",
-        irrelevant: keepinMaterial.irrelevant || false,
-        // Обновляем поле available согласно полученному фактическому остатку из Sitniks
-        available: newStock,
+        title: keepinMat.title,
+        unit: keepinMat.unit || "шт.",
+        price: parseFloat(keepinMat.price_amount) || 0,
+        cost: parseFloat(keepinMat.cost_amount) || 0,
+        currency: keepinMat.currency || "UAH",
+        cost_currency: keepinMat.cost_currency || "UAH",
+        weight: keepinMat.weight || 0,
+        volume: keepinMat.volume || 0,
+        asset_url: keepinMat.asset_url || "",
+        link_url: keepinMat.link_url || "",
+        category_id: keepinMat.marketplace_uid || 0,
+        irrelevant: keepinMat.irrelevant || false,
+        available: sit.stock,
         stock_rests_attributes: [
           {
             office_id: OFFICE_ID,
             office_hash_id: OFFICE_HASH_ID,
             office_name: OFFICE_NAME,
-            available: newStock
+            available: sit.stock
           }
         ],
         custom_fields: [],
-        named_custom_prices: {
-          "Опт": 10,
-          "Інтернет": "12 USD"
-        }
+        named_custom_prices: { "Опт": 10, "Інтернет": "12 USD" }
       };
 
-      const updateURL = updateMaterialBySkuURL(sku);
-      console.log(`Обновляем материал с SKU ${sku} в Keepin. Новый остаток: ${newStock}`);
-      try {
-        const updateRes = await fetch(updateURL, {
-          method: "PUT",
-          headers: headersKeepin,
-          body: JSON.stringify(updatePayload)
-        });
-        if (!updateRes.ok) {
-          const errorText = await updateRes.text();
-          console.error(`Ошибка обновления материала для SKU ${sku}: ${updateRes.status} - ${errorText}`);
-        } else {
-          const result = await updateRes.json();
-          console.log(`Успешное обновление материала для SKU ${sku}:`, result);
-
-          // (Необязательно) Логирование операции в БД
-          const logEntry = new StockLog({
-            sku,
-            newStock,
-            comment: "Полный перегон остатков из Sitniks в Keepin"
-          });
-          await logEntry.save();
-
-          // (Необязательно) Обновляем запись о текущем остатке в БД
-          let stockRecord = await ProductStock.findOne({ sku });
-          if (!stockRecord) {
-            stockRecord = new ProductStock({ sku, stockQuantity: newStock });
-          } else {
-            stockRecord.stockQuantity = newStock;
-            stockRecord.updatedAt = new Date();
-          }
-          await stockRecord.save();
-        }
-      } catch (error) {
-        console.error(`Ошибка отправки обновления для SKU ${sku}:`, error);
+      const updRes = await fetch(updateMaterialBySkuURL(sku), {
+        method: "PUT",
+        headers: headersKeepin,
+        body: JSON.stringify(payload)
+      });
+      if (!updRes.ok) {
+        console.error(`Keepin update failed for ${sku}:`, await updRes.text());
+        continue;
       }
+
+      await ProductStock.updateOne(
+        { sku },
+        { stockQuantity: sit.stock, lastSyncedAt: sit.updatedAt }
+      );
+      await new StockLog({
+        sku,
+        newStock: sit.stock,
+        comment: 'Incremental full sync'
+      }).save();
     }
-    res.json({ status: "success", message: "Полный перегон остатков завершён" });
-  } catch (error) {
-    console.error("Ошибка в полном перегоне остатков:", error);
-    res.status(500).json({ error: "Ошибка полного переноса остатков" });
+
+    res.json({ status: "success", message: "Incremental sync done" });
+  } catch (err) {
+    console.error("Full sync error:", err);
+    res.status(500).json({ error: "Full sync failed" });
+  } finally {
+    isFullSyncRunning = false;
   }
 });
 
-// Запуск сервера
-app.listen(PORT, () => {
-  console.log(`Интеграционный сервер запущен на порту ${PORT}`);
-});
-
-
-setInterval(async () => {
-  try {
-    const response = await fetch(`http://localhost:${PORT}/sync/full`);
-    const result = await response.json();
-    console.log("Автосинхронизация /sync/full:", result);
-  } catch (error) {
-    console.error("Ошибка при автосинхронизации:", error);
-  }
+// --- Запуск сервера и автосинхронизация каждые 15 секунд ---
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+setInterval(() => {
+  fetch(`http://localhost:${PORT}/sync/full`).catch(err => console.error("Auto-sync error:", err));
 }, 15000);
