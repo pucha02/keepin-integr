@@ -768,10 +768,10 @@ import fetch from 'node-fetch';
 import mongoose from 'mongoose';
 
 const app = express();
-const PORT = 3000;
+const PORT = 5001;
 
 // Подключение к MongoDB
-mongoose.connect('mongodb://localhost:27017/integration', { 
+mongoose.connect('mongodb+srv://salaryapp5:aM5DtXeMRklFosy5@cluster0.l1wfm.mongodb.net/test?retryWrites=true&w=majority', { 
   useNewUrlParser: true, 
   useUnifiedTopology: true 
 })
